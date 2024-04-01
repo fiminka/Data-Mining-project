@@ -1,0 +1,140 @@
+---
+title: "Data Mining - project (Adults)"
+author: "Wiktoria Fimińska 262283, Julia Grzegorzewska 262314"
+date: "`r Sys.Date()`"
+fontsize: 12pt
+output: 
+  pdf_document:
+        toc: true
+        toc_depth: 3
+        number_sections: true
+        fig_caption: true
+        
+header-includes:
+    - \usepackage{polski}
+    - \usepackage[utf8]{inputenc}
+    - \usepackage{graphicx}
+    -  \usepackage{amsmath}
+    - \usepackage{multirow}
+    - \usepackage{float}
+    - \usepackage{enumitem}
+    - \usepackage{mathtools}
+    - \usepackage{hyperref}
+    - \usepackage{url}
+    - \mathtoolsset{showonlyrefs}
+    - \usepackage{caption}
+    - \usepackage{geometry}
+    
+---
+\newpage
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+```{r echo=FALSE}
+pdf.options(encoding = 'CP1250')
+```
+
+\section{Introduction}
+
+
+\section{Data}
+```{r, echo = FALSE, message=FALSE}
+library(dplyr)
+library(DataExplorer)
+data <- read.csv(file="data\\adult.data", stringsAsFactors = TRUE, col.names=c("age", "workclass", "fnlwgt", "education", 
+                                                       "education.num","marital.status", "occupation", "relationship", "race","sex",
+                                                       "capital.gain", "capital.loss", "hours.per.week","native.country", "income"))
+attach(data)
+data %>% sample_n(5)
+```
+
+```{r}
+# which columns have '?' values
+columns_with_question <- names(data)[sapply(data, function(col) any(col == " ?"))]
+
+print(columns_with_question)
+```
+
+
+\subsection{Data characteristics}
+Dataset contains $14$ variables, which are:
+\begin{enumerate}[label=(\alph*)]
+    \item \textbf{age}\\
+    age of a person - continuous variable.
+    \item \textbf{workclass}\\
+    workclass of a person: Private, Self-emp-not-inc, Self-emp-inc, Federal-gov, Local-gov, State-gov, Without-pay, Never-worked.
+    \item \textbf{fnlwgt}\\
+    NO IDEA WHAT IT IS
+    \item \textbf{education}\\
+    level of education of a person: Bachelors, Some-college, 11th, HS-grad, Prof-school, Assoc-acdm, Assoc-voc, 9th, 7th-8th, 12th, Masters, 1st-4th, 10th, Doctorate, 5th-6th, Preschool.
+    \item \textbf{education-num}\\
+    continuous version of education (ONE OF THEM WON'T BE NECESSARY TO USE - WE JUST DROP IT)
+    \item \textbf{marital-status}\\
+    marital status of a person: Married-civ-spouse, Divorced, Never-married, Separated, Widowed, Married-spouse-absent, Married-AF-spouse.
+    \item \textbf{occupation}\\ 
+    occupation of a person: Tech-support, Craft-repair, Other-service, Sales, Exec-managerial, Prof-specialty, Handlers-cleaners, Machine-op-inspct, Adm-clerical, Farming-fishing, Transport-moving, Priv-house-serv, Protective-serv, Armed-Forces.
+    \item \textbf{relationship}\\
+    relationship status of a person: Wife, Own-child, Husband, Not-in-family, Other-relative, Unmarried.
+    \item \textbf{race}\\
+    race of a person: White, Asian-Pac-Islander, Amer-Indian-Eskimo, Other, Black.
+    \item \textbf{sex}\\
+    sex of a person: Female, Male.
+    \item \textbf{capital-gain}\\
+    amount of money a person gained - continuous variable.
+    \item \textbf{capital-loss}\\
+    amount of money a person loosed - continuous variable.
+    \item \textbf{hours-per-week}\\
+    XYZ idk
+    \item \textbf{native-country}\\
+    native-country of a person: United-States, Cambodia, England, Puerto-Rico, Canada, Germany, Outlying-US(Guam-USVI-etc), India, Japan, Greece, South, China, Cuba, Iran, Honduras, Philippines, Italy, Poland, Jamaica, Vietnam, Mexico, Portugal, Ireland, France, Dominican-Republic, Laos, Ecuador, Taiwan, Haiti, Columbia, Hungary, Guatemala, Nicaragua, Scotland, Thailand, Yugoslavia, El-Salvador, Trinadad\&Tobago, Peru, Hong, Holand-Netherlands.
+\end{enumerate}
+
+\subsection{Data preparation}
+```{r, echo = FALSE}
+columns_with_question <- sapply(data, function(col) sum(col == ' ?') > 0)
+for (column in names(data)[columns_with_question]) {
+  data[data[[column]] == ' ?', column] <- NA
+}
+data %>% sample_n(10)
+```
+
+Missing observations?
+```{r}
+sum(is.na(data))
+```
+WE NEED TO FIND A METHOD TO FILL THE NANS 
+
+```{r}
+summary(age)
+summary(capital.gain)
+summary(capital.loss)
+summary(hours.per.week)
+```
+
+```{r}
+table(workclass)
+table(education)
+table(marital.status)
+table(occupation)
+table(relationship)
+table(race)
+table(sex)
+table(income)
+table(native.country)
+```
+```{r, fig.cap="Charts: continuous quantitative data", fig.align="center"}
+par(mfrow=c(2,3))
+hist(age)
+hist(hours.per.week)
+hist(capital.gain)
+boxplot(age, main="Age")
+boxplot(hours.per.week, main="Hours per week")
+boxplot(capital.gain, main="Capital loss")
+par(mfrow=c(1,1))
+```
+
+\section{Analysis}
+
+
+\section{Discussion}
