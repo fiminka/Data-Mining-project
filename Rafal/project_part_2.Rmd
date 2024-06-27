@@ -1,0 +1,911 @@
+---
+title: "German Credit Data"
+author: "Rafał Sokołowski"
+date: "2023-01-21"
+output: 
+  bookdown::pdf_document2:
+      toc: true
+      toc_depth: 3
+      number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(stats)
+library(cluster)
+library(NbClust)
+library(clValid)
+library(factoextra)
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(BBmisc)
+library(e1071)
+library(gridExtra)
+
+# You have to run load_data from python scripts and save the result
+X_train <- read.csv(file="data/X_train.csv")
+X_test <- read.csv(file="data/X_test.csv")
+y_train <- read.csv(file="data/y_train.csv")
+y_test <- read.csv(file="data/y_test.csv")
+
+X = rbind(X_train, X_test)
+y = rbind(y_train, y_test)
+
+# First normalizing
+# X_scaled = normalize(X, method = "range", range = c(0, 1))
+
+X_scaled <- scale(X)
+# X_test_std <-  scale(X_test_norm)
+
+data_dissimilarity <- daisy(X_scaled, metric = 'gower')
+data_dissimilarity_matrix  <- as.matrix(data_dissimilarity)
+```
+
+# Introduction
+
+We move to the second part in the project, where we will discuss the *clusterization* and *dimensionality reduction*. Let's start with summarizing what we managed to do for now. The project stands from analysing **German credit data set**, in which our goal is to determine whether, the customer will pay the loan or he wouldn't do it.
+
+As for now, we performed set of supervised methods for classification purpose. We discussed models as:
+
+- LDA
+- QDA
+- K-Neighbors
+- Random Forest
+- TPOT - pipeline optimization using genetic algorithms
+
+We conducted, that the best model was Random Forest with 80% AUC score along with 77% accuracy. It obtained even better result than TPOT optimization, which also found model from Random Forest family.
+
+For the modeling purpose we performed EDA (exploratory data analysis) and basic data preparation, including:
+
+- Dependency analysis, which resulted in dropping some of the features,
+- Ordinal encoding - for categorical variables with defined order,
+- One-hot encoding - for categorical variables without encoding,
+- Passing through numerical values,
+- Outlier detection using *Isolation forest*,
+- Splitting data into train and test set.
+
+We will use such obtained data set for our cluster analysis, to make the comparison between supervised and unsupervised methods more reliable. The main problem occurs from the scheme of our data. Most of features are categorical, which will result in violating some of the assumptions in methods that will use. We are aware that it will happen, but because such variables are the majority, we will go along with that and see what will happen. 
+
+Lastly, most of the columns are binary encoded flags (0 or 1). Comparing them with numerical values like, e.g. duration will generate huge bias during distance calculation. Because of that, we will standardize the whole data set before modeling. Additionally, we will fit the models using combined train and test set, but during the quality assessment, we will diverse between them.
+
+# Modeling
+
+## Methods used
+
+### K-Means
+
+In K-Means algorithm we determine the membership of point to one of the $K$ clusters. The algorithm:
+
+- initialize $K$ cluster centers $m_k= k=1, ..., K$,
+- Assign each point to cluster using the shortest distance,
+- Calculate new cluster centers $m_k = \sum_{x_i \in C_k} x_i$,
+
+where $C_k$ are observations from cluster $k$, $k=1,..., K$.
+
+### Partition Around Medoids (PAM)
+
+It's one of the generalizations of K-Means method, in which we also are seeking for cluster centers, but instead of calculating them, we will search for $K$ representative objects (so-called *medoids*). The algorithm:
+
+- From the set of $n$ objects we select sequentially $K$ representative objects, which are the initial centers of clusters,
+- We minimize the sum of the distances of objects from corresponding medoids by replacing the curent medoids by other observations.
+
+### Aglomerative nestings (AGNES)
+
+AGNES is a hierarchical clustering method. At the beginning, each object forms a separate cluster. In the next steps, the closest clusters are combined until one large cluster is created. The algorithm:
+
+1. Each object forms a separate cluster,
+2. We find the two closest clusters,
+3. We join those clusters and replace them with one cluster,
+4. repeat steps 2-3 until one large cluster is created.
+
+We will analyse the algorithm using the complete linkage method.
+
+### Divisive Analysis (DIANA)
+
+DIANA is a divisive algorithm, where in the first step all objects form one large cluster, which is then divided so as to obtain homogeneous groups.
+
+### Gower's dissimilarity measure
+
+Most of the described algorithms can take as an input a *dissimilarity matrix* - the matrix which will determine the relation between observations and allow the proper grouping. Our data set consists of different types of features, including: ordinal, binary, continuous. From the lecture we know, that in general for such case we should use **Gower's dissimilarity measure**, defined as below:
+
+$$d_{ij} = \sum_{k=1}^p w_k d_{ij}^k / \sum_{k=1}^p w_k, \text{ where}$$
+
+- $w_k$ 0 weight of attribute $k$,
+- $d_{ij}^k$ 0 distance (dissimilarity) calculated on the basis of $k$-th value.
+
+
+## Clustering - Internal indices quality assessment
+
+We will start our analysis with determining the behavior of described clustering algorithms across different number of clusters, wherever we could, we used the dissimilarity matrix based on Gower's dissimilarity measure. For each case, we will compute the average silhouette score.
+
+```{r silhouette-comp1, warning=FALSE, fig.cap="Comparison of silhouette score for different clustering methods against number of selected clusters. The solid lines represents the level of maximum silhouette score for each algorithm.", fig.align='center', message=FALSE}
+diana.res <- diana(x=data_dissimilarity_matrix, diss=TRUE)
+
+kmeans.silhoulette <- c()
+agnes.silhoulette <- c()
+pam.silhoulette <- c()
+diana.silhoulette <- c()
+
+for (k in 2:10){
+  # K-means
+  km.res <- kmeans(X_scaled, k, iter.max=100, nstart=100)
+  sil.kmeans <- silhouette(km.res$cluster, dmatrix=data_dissimilarity_matrix)
+  kmeans.silhoulette <- c(kmeans.silhoulette, sil.kmeans[,3] %>% mean)
+  # AGNES
+  agnes.res <- agnes(data_dissimilarity_matrix, method="complete", diss=TRUE)
+  agnes.partition <- cutree(agnes.res, k=k)
+  sil.agnes <- silhouette(agnes.partition, dmatrix=data_dissimilarity_matrix)
+  agnes.silhoulette <- c(agnes.silhoulette, sil.agnes[,3] %>% mean)
+  # PAM
+  pam.res <- pam(x=data_dissimilarity_matrix, diss=TRUE, k=k)
+  sil.pam <- silhouette(pam.res$clustering, dmatrix=data_dissimilarity_matrix)
+  pam.silhoulette <- c(pam.silhoulette, sil.pam[,3] %>% mean)
+  # DIANA
+  diana.partition <- cutree(diana.res, k=k)
+  sil.diana <- silhouette(diana.partition, dmatrix=data_dissimilarity_matrix)
+  diana.silhoulette <- c(diana.silhoulette, sil.diana[,3] %>% mean)
+}
+
+k.seq <- 2:10
+silhoulette.df <- data.frame(k=rep(k.seq, 4),
+                             Silhoulette=c(kmeans.silhoulette, agnes.silhoulette, pam.silhoulette, diana.silhoulette),
+                             Method=c(rep('k-means', length(kmeans.silhoulette)),
+                                      rep('AGNES', length(agnes.silhoulette)),
+                                      rep('PAM', length(pam.silhoulette)),
+                                      rep('DIANA', length(diana.silhoulette))))
+max.silhoulette <- tapply(silhoulette.df$Silhoulette, silhoulette.df$Method, max)
+
+ggplot() +
+  geom_line(aes(x=k.seq, y=max.silhoulette[1]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[2]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[3]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[4]), linetype = "solid") +
+  geom_line(data=silhoulette.df, aes(x=k, y=Silhoulette, color=Method), size=1, linetype = "dashed") +
+  geom_point(data=silhoulette.df, aes(x=k, y=Silhoulette, color=Method), size=3) +
+  labs(title='Silhoulette index for various clustering methods',
+       y='Silhoulette index',
+       x='k')
+```
+
+As we can see on Figure @ref(fig:silhouette-comp1) the overall silhouette score is positive, so the clustering occurs, despite that the score itself isn't perhaps very high. What is relevant is that each algorithm obtained the highest score for $K=2$ clusters, so we should expect that our observations can be divided into two groups. That conclusion pleases us, because our initial goal was a binary classification, so there were only two classes. Increasing the number of clusters will decrease the average silhouette, so it is better to keep low number of groups.
+
+
+```{r validation-indices, warning=FALSE}
+methods <- c("kmeans", "pam", "agnes","diana")
+K.range <- 2:10
+
+internal.validation <- clValid(X_scaled, nClust=K.range, clMethods=methods, validation="internal", method = "complete",
+                               maxitems = 1000)
+
+knitr::kable(optimalScores(internal.validation),
+             caption = "Best clusterization algorithms with their corresponding numbers of clusters for specified internal indices.",
+             digits = 3)
+```
+
+Apart from this analysis, we performed the cluster validation using *clValid* function in *R* for the same methods. The difference was, that we used Euclidean measure as a distance for clusters. This resulted in different values for silhouette score, but it can give us another view on how the methods could behave in such case. We inspect three measures:
+
+- Connectivity,
+- Dunn index,
+- Average silhouette score.
+
+The results of the optimal solutions can be seen in Table @ref(tab:validation-indices). As we can see, the K-Means dominates in all measures across the algorithms. Using the Euclidean distance, we improved the silhouette score, but it can be due to the fact, that some of the variables, despite the standardization, still out stands from other features. What is more, for different measures, the different number of cluster is selected. For more detailed analysis we can see Figure @ref(fig:validation-plots).
+
+```{r validation-plots, fig.height=8, fig.cap="Different internal indices calculated accross set of algorithms with different numbers of clusters.", fig.align='center', warning=FALSE}
+par(mfrow=c(3,1))
+plot(internal.validation)
+```
+
+Let's start with connectivity, which for almost all algorithms is quite low, at least for small number of clusters. So the result for K-Means ($K=2$) could be assigned for either AGNES and DIANA. For this case the PAM algorithm worked badly. The Dunn index also behaves similar for those 3 algorithms, and it keeps similar level for each $K=2, 3, 4$, but of course the $K=4$ identifies the most compact clusters. As we mentioned the silhouette was calculated with slightly other method, so we observe other result. Again K-Means, DIANA and AGNES behaves well and similar unlike PAM which can't manage it. 
+
+### Silhouette score for different algorithms
+
+We will analyse the behaviour of silhouette score for all observations and algorithms one by one. We will take under consideration the best case, for which the algorithms obtained the highest value, so for $K=2$. Let's start with K-Means.
+
+```{r silhouette-kmeans, fig.height=4, warning=FALSE, fig.cap="Cluster silhouette plot for k-means algorithm.", fig.align='center'}
+kmeans.res <- kmeans(X_scaled, 2, nstart=10)
+kmeans.final = kmeans.res$cluster
+sil.kmeans.final <- silhouette(kmeans.final, dmatrix=data_dissimilarity_matrix)
+fviz_silhouette(sil.kmeans.final, xlab="K-Means , k=2", print.summary=FALSE)
+```
+
+On the Figure @ref(fig:silhouette-kmeans) we can see the silhouette of each observation after using K-means method. The observations in cluster 2 are above average what is good, the bigger problems come from cluster 1 in which some of the observations don't fit. The algorithm keep the proportion of the data set. As we can remember, there were 30% of bad customers and 70% of good customers, those volumes may correspond to respectively cluster 2 and 1.
+
+
+```{r silhouette-pam, fig.height=4, warning=FALSE, fig.cap="Cluster silhouette plot for PAM algorithm.", fig.align='center'}
+pam.final <- pam(x=data_dissimilarity_matrix, diss=TRUE, k=2)
+sil.pam.final <- silhouette(pam.final$clustering, dmatrix=data_dissimilarity_matrix)
+fviz_silhouette(sil.pam.final, xlab="PAM, k=2", print.summary=FALSE)
+```
+
+Let's take a look at the PAM results, which are presented on Figure @ref(fig:silhouette-pam). The results are very similar to those presented by K-Means, despite the assignment of cluster labels. It makes sense since both algorithms use similar methodology under the hood. Both algorithms move the centre of clusters to the best possible location.
+
+```{r silhouette-agnes, fig.height=4, warning=FALSE, fig.cap="Cluster silhouette plot for AGNES algorithm.", fig.align='center'}
+agnes.res <- agnes(data_dissimilarity_matrix,  method="complete", diss=TRUE)
+agnes.final <- cutree(agnes.res, k=2)
+sil.agnes.final <- silhouette(agnes.final, dmatrix=data_dissimilarity_matrix)
+fviz_silhouette(sil.agnes.final, xlab="AGNES, k=2", print.summary=FALSE)
+```
+
+On the Figure @ref(fig:silhouette-agnes) the result is slightly different. The average silhouette score is slightly lower than previously and there are some observations which have negative silhouette score, so they are incorrectly assigned. But as we can see, the proportion of observations in cluster still holds.
+
+```{r silhouette-diana, fig.height=4, warning=FALSE, fig.cap="Cluster silhouette plot for DIANA algorithm.", fig.align='center'}
+diana.res <- diana(x=data_dissimilarity_matrix, diss=TRUE)
+diana.final <- cutree(diana.res, k=2)
+sil.diana.final <- silhouette(diana.final, dmatrix=data_dissimilarity_matrix)
+fviz_silhouette(sil.diana.final, xlab="DIANA, k=2", print.summary=FALSE)
+```
+
+Lastly, we can take a look at the Figure @ref(fig:silhouette-diana), where we can see results of DIANA. These are almost identical as for K-Means and PAM algorithms. The difference of the results with AGNES may occurred from specified linkage method. Perhaps by using some other method, the results for all 4 algorithms could be very similar. 
+
+## Clustering - Quality Assessment
+
+Presented algorithms are examples of unsupervised learning methods, so we don't know whether our results are good or not. Those methods tend to find some of interesting relationship within the data. Initially our task was classification and just for clustering purpose we discarded the labels. As we perform some kind of analysis, we can move back and check the quality of algorithms. In the Table @ref(tab:metric-tables) we can see a set of metrics calculated for clustering algorithms along with the results from previous classification. 
+
+We trained our cluster algorithms using the whole data set, but we can select the observations which initially were assigned for the test set. We know how the results looked for the supervised methods and now we can compare them for clustering methods. In this place we should mention, that it is difficult to compare the real class labels with the labels assigned by clusters. Such assignment is often random and is unreliable. Having that, as a preliminary step, we performed optimal class assignment. As a sanity check for that, we can look at the column *Accuracy.full* which was calculated only for cluster algorithms (because supervised methods weren't evaluated on the whole data set). We can be sure that it was done properly if the value is higher than 0.5, because if it's not, then the labels should be assigned conversely.
+
+```{r metric-tables, echo=FALSE}
+n_test = nrow(y_test)
+n_train = nrow(y_train)
+
+
+labels.kmeans.test <- tail(kmeans.final, n=n_test)
+labels.kmeans.train <- tail(kmeans.final, n=n_train)
+
+labels.agnes.test <- tail(agnes.final, n=n_test)
+labels.agnes.train <- tail(agnes.final, n=n_train)
+
+labels.pam.test <- tail(pam.final$clustering, n=n_test)
+labels.pam.train <- tail(pam.final$clustering, n=n_train)
+
+labels.diana.test <- tail(diana.final, n=n_test)
+labels.diana.train <- tail(diana.final, n=n_train)
+
+labels.real.test <- y_test$label
+labels.real.train <- y_train$label
+labels.real <- y$label
+
+kmeans.acc <- compareMatchedClasses(kmeans.final, labels.real, method="exact")$diag %>% as.double()
+kmeans.acc.test <-  compareMatchedClasses(labels.kmeans.test, labels.real.test, method="exact")$diag %>% as.double()
+kmeans.acc.train <- compareMatchedClasses(labels.kmeans.train, labels.real.train, method="exact")$diag %>% as.double()
+
+pam.acc <- compareMatchedClasses(pam.final$clustering, labels.real, method="exact")$diag %>% as.double()
+pam.acc.test <-  compareMatchedClasses(labels.pam.test, labels.real.test, method="exact")$diag %>% as.double()
+pam.acc.train <- compareMatchedClasses(labels.pam.train, labels.real.train, method="exact")$diag %>% as.double()
+
+agnes.acc <- compareMatchedClasses(agnes.final, labels.real, method="exact")$diag %>% as.double()
+agnes.acc.test <-  compareMatchedClasses(labels.agnes.test, labels.real.test, method="exact")$diag %>% as.double()
+agnes.acc.train <- compareMatchedClasses(labels.agnes.train, labels.real.train, method="exact")$diag %>% as.double()
+
+diana.acc <- compareMatchedClasses(diana.final, labels.real, method="exact")$diag %>% as.double()
+diana.acc.test <-  compareMatchedClasses(labels.diana.test, labels.real.test, method="exact")$diag %>% as.double()
+diana.acc.train <- compareMatchedClasses(labels.diana.train, labels.real.train, method="exact")$diag %>% as.double()
+
+
+scores = function(pred, real){
+  (tab <- table(pred, real))
+  x <- matchClasses(tab, method="exact", verbose=FALSE)
+  tab <- tab[names(x), x]
+  rownames(tab) <- as.numeric(x)
+  colnames(tab) <- as.numeric(x)
+  tab <- tab[c("1", "0"), c("1", "0")]
+  
+  results1 <- confusionMatrix(tab, mode='prec_recall')
+  results1$byClass
+  return(results1$byClass)
+}
+
+r <- scores(labels.kmeans.test, labels.real.test)
+kmeans.f1 = r["F1"]
+kmeans.recall = r["Recall"]
+kmeans.precision = r["Precision"]
+
+r <- scores(labels.pam.test, labels.real.test)
+pam.f1 = r["F1"]
+pam.recall = r["Recall"]
+pam.precision = r["Precision"]
+
+r <- scores(labels.agnes.test, labels.real.test)
+agnes.f1 = r["F1"]
+agnes.recall = r["Recall"]
+agnes.precision = r["Precision"]
+
+r <- scores(labels.diana.test, labels.real.test)
+diana.f1 = r["F1"]
+diana.recall = r["Recall"]
+diana.precision = r["Precision"]
+
+
+results.init <- data.frame(Accuracy.full=c(kmeans.acc, pam.acc, agnes.acc, diana.acc),
+                           Accuracy.train=c(kmeans.acc.train, pam.acc.train, agnes.acc.train, diana.acc.train),
+                           Accuracy.test=c(kmeans.acc.test, pam.acc.test, agnes.acc.test, diana.acc.test),
+                           F1.test=c(kmeans.f1, pam.f1, agnes.f1, diana.f1),
+                           Recall.test=c(kmeans.recall,pam.recall, agnes.recall, diana.recall),
+                           Precision.test=c(kmeans.precision, pam.precision, agnes.precision, diana.precision))
+
+rownames(results.init) <- c('K-Means', 'PAM', 'AGNES' , 'DIANA')
+
+results.init2 <- data.frame(Accuracy.full=c(NA, NA, NA, NA, NA),
+                           Accuracy.train=c(0.76, 0.77, 0.74, 0.96, 0.93),
+                           Accuracy.test=c(0.74, 0.77, 0.72, 0.77, 0.74),
+                           F1.test=c(0.48, 0.59, 0.43, 0.63, 0.40),
+                           Recall.test=c(0.41, 0.56, 0.36, 0.66, 0.29),
+                           Precision.test=c(0.60, 0.63, 0.55, 0.60, 0.63))
+
+rownames(results.init2) <- c('LDA', 'QDA', 'K-Neighbors' , 'Random Forest', 'TPOT')
+
+results.init = rbind(results.init, results.init2)
+
+knitr::kable(results.init,
+             caption = "Results of all analysed algorithms in classifying bad customers.",
+             digits = 3)
+```
+
+We can see, that the clustering algorithms obtained very similar results on the level of 60% accuracy, and only the AGNES performs slightly worse. If we look at the metrics on the test set, then we can see that in fact, the algorithms perform poorly for such task. The classifying bad customers is very important, and analysed methods cannot manage that. All scores are below 40%. What is natural, the classification methods performs better than the clustering methods. It makes sense, because they used additional information about the customers during the learning process, which was the labels. The conclusion is that, perhaps there are no clear rules which could determine if customer is good or bad judging by such information. 
+
+# Dimensionality reduction
+
+We will use *dimensionality reduction* methods to transform our initial feature space
+into space in lower dimension. Such operation may result in removing redundant variables from the data set and clarify some of the hidden relationship between it and the label. Lots of transformations can result in handling the problem of ordinal and binary variables, turning them into continuous one. It can lead to in better behaviour of our clustering methods, as well as the classification methods.
+
+## Used methods
+
+### Principal Component Analysis (PCA)
+
+PCA is an algorithm which transforms original feature space into another using some sort of linear combination. In other words, we want to transform our variables $X_1, X_2, ..., X_p$ into so-called *principal components* $PC_1, PC_2, ..., PC_p$, where $PC_i, i=1,...,p$ are sorted and the $PC_1$ has the highest variability. Setting threshold of overall data variability that we want to keep, we can reduce the space dimensionality by discarding the least "informative" variables.
+
+### Multidimensional Scaling (MDS)
+
+As PCA, MDS tends to reduce the data dimensionality, but this time it tries to preserve original distances between objects. Regarding the fact, our variables are of different type, we will use proper dissimilarity matrix, more specifically using Gower's dissimilarity measure.
+
+## Projecting with PCA
+
+Let's start by transforming our data set with PCA algorithm. Using the specification of the method, we can analyse the *explained variance ratio*, so the normalized variability of each principal component. Furthermore, we can inspect, the *cumulative explained variance ratio* which will show us how many principal components should we take in order to keep some level of information in our data set.
+
+```{r pca-projection, fig.height=8, warning=FALSE, fig.cap="Explained variance ratio and cumulative explaned variance after using PCA on our data set.", fig.align='center'}
+
+par(mfrow=c(2,1))
+x.data.pca <- prcomp(X_scaled, retx=T, center=T, scale.=T)
+variance.pca <- (x.data.pca$sdev ^2)/sum(x.data.pca$sdev^2)
+pca.data <- x.data.pca$x %>% data.frame
+cumulative.variance <- cumsum(variance.pca)
+
+barplot(variance.pca, names.arg = sprintf("PC%s",seq(1:length(variance.pca))),
+        ylab = 'Explained variance ratio')
+title('Explained variance of the variables obtained by PCA')
+
+barplot(cumulative.variance, ylab = 'Explained variance ratio', names.arg=seq(1:length(variance.pca)))
+```
+
+Both information were visualized in Figure @ref(fig:pca-projection). As we expect, the explained variance will decrease as the number of principal component increase. For features above $PC_{30}$ are these whose variability is even 0, so definitely we will discard them. We can see that the $PC_1$ holds about 9% of the whole data set variability which, regard to number of features, is quite high. In later analysis, we will constrain ourselves to keep the 90% data variability, as it is often done in practice.
+
+```{r pca1-pca2,warning=FALSE, fig.cap="Visualization of data set  after PCA in 2D. We plot PC1 versus PC2 and just for reference we mark observations using the true customer's label."}
+ggplot() +
+  geom_point(
+    aes(x=pca.data$PC1,
+        y=pca.data$PC2,
+        color=y$label %>% as.factor),
+    size=2)+
+  labs(title='Data set after performing (PCA)', color='True Label')
+```
+
+For now let's take advantage of other property which dimensionality reduction allows us, so let's visualize the data in 2D space using $PC_1$ and $PC_2$. The result is presented on Figure @ref(fig:pca1-pca2). As we can see, observations are grouped into 2 separate clusters. It may indicate the fact, that lots of our initial features were one hot encoded, which lead to such shifted shape. Despite, the fact that we have two independent groups, if we mask them using true labels, we can see that they are completely mixed. There is no clear relation between the $PC_1$, $PC_2$ and the customer attitude. At this moment, we can expect, that the performance of the algorithms perhaps wouldn't be better than previously.
+
+```{r pca1-pca2-all,warning=FALSE, fig.cap="Visualization of data set  after PCA in 2D. We plot PC1 versus PC2 and just for reference we mark observations using the results of considered clusterization algorithms vs true labels."}
+
+
+kmeans.res <- kmeans(pca.data[, 1:10], 2, nstart=10)
+kmeans.final.pca = kmeans.res$cluster
+
+pam.final.pca <- pam(pca.data[,1:10], k=2)$clustering
+
+agnes.res <- agnes(pca.data[, 1:10],  method="complete")
+agnes.final.pca <- cutree(agnes.res, k=2)
+
+diana.res <- diana(pca.data[, 1:10])
+diana.final.pca <- cutree(diana.res, k=2)
+
+
+plot1 <- ggplot() +
+  geom_point(
+    aes(x=pca.data$PC1,
+        y=pca.data$PC2,
+        shape=kmeans.final.pca %>% as.factor, 
+        color=y$label %>% as.factor),
+    size=1)+
+  labs(title='K-Means (PCA)', shape='Cluster', color='Label')
+
+plot2 <- ggplot() +
+  geom_point(
+    aes(x=pca.data$PC1,
+        y=pca.data$PC2,
+        shape=pam.final.pca %>% as.factor, 
+        color=y$label %>% as.factor),
+    size=1)+
+  labs(title='PAM (PCA)', shape='Cluster', color='Label')
+
+plot3 <- ggplot() +
+  geom_point(
+    aes(x=pca.data$PC1,
+        y=pca.data$PC2,
+        shape=agnes.final.pca %>% as.factor, 
+        color=y$label %>% as.factor),
+    size=1)+
+  labs(title='AGNES (PCA)', shape='Cluster', color='Label')
+
+plot4 <- ggplot() +
+  geom_point(
+    aes(x=pca.data$PC1,
+        y=pca.data$PC2,
+        shape=diana.final.pca %>% as.factor, 
+        color=y$label %>% as.factor),
+    size=1)+
+  labs(title='DIANA (PCA)', shape='Cluster', color='Label')
+
+grid.arrange(plot1, plot2, plot3, plot4, ncol=2, nrow =2)
+```
+
+For further analysis, we can train our clustering algorithms on, e.g. 10 first principal components and check, how they will perform. Following that, we will visualize its predictions on the lower 2D space. Such information can give us hint if despite no significant relations with two first components, we can obtain some better results using more features. The results are presented on Figure @ref(fig:pca1-pca2-all). As we could expect, the algorithms focused mainly on separating those two clearly visible groups, although it won't improve the classification of customer's attitude. So in most cases, one group is marked with triangles and the other is marked with circles. Interesting part happens in AGNES algorithm where in spite of separating observations by those two groups, it tries to slice both of them using one skew line.
+
+### Selecting valid number of principal components
+
+```{r silhouette-after-dim-red, warning=FALSE, fig.cap="Comparison of silhouette score for different clustering methods after using PCA against selected number of clusters. The solid lines represents the level of maximum silhouette score for each algorithm."}
+
+n.pc = sum(cumulative.variance < 0.9) + 1
+
+pca.train.data = pca.data[, 1:n.pc]
+write.table(pca.train.data, file = "data\\pca_data.csv",
+            sep = ",", row.names = F)
+diana.res <- diana(pca.train.data)
+
+kmeans.silhoulette <- c()
+agnes.silhoulette <- c()
+pam.silhoulette <- c()
+diana.silhoulette <- c()
+
+for (k in 2:10){
+  # K-means
+  kmeans.res <- kmeans(pca.train.data, k, nstart=10)
+  sil.kmeans <- silhouette(km.res$cluster, dist(pca.train.data))
+  kmeans.silhoulette <- c(kmeans.silhoulette, sil.kmeans[,3] %>% mean)
+  # AGNES
+  agnes.res <- agnes(pca.train.data,  method="complete")
+  agnes.partition <- cutree(agnes.res, k=k)
+  sil.agnes <- silhouette(agnes.partition, dist(pca.train.data))
+  agnes.silhoulette <- c(agnes.silhoulette, sil.agnes[,3] %>% mean)
+  # PAM
+  pam.res <- pam(pca.train.data, k=k)
+  sil.pam <- silhouette(pam.res$clustering, dist(pca.train.data))
+  pam.silhoulette <- c(pam.silhoulette, sil.pam[,3] %>% mean)
+  # DIANA
+  diana.partition <- cutree(diana.res, k=k)
+  sil.diana <- silhouette(diana.partition, dmatrix=data_dissimilarity_matrix)
+  diana.silhoulette <- c(diana.silhoulette, sil.diana[,3] %>% mean)
+}
+
+k.seq <- 2:10
+silhoulette.df <- data.frame(k=rep(k.seq, 4),
+                             Silhoulette=c(kmeans.silhoulette, agnes.silhoulette, pam.silhoulette, diana.silhoulette),
+                             Method=c(rep('k-means', length(kmeans.silhoulette)),
+                                      rep('AGNES', length(agnes.silhoulette)),
+                                      rep('PAM', length(pam.silhoulette)),
+                                      rep('DIANA', length(diana.silhoulette))))
+max.silhoulette <- tapply(silhoulette.df$Silhoulette, silhoulette.df$Method, max)
+
+ggplot() +
+  geom_line(aes(x=k.seq, y=max.silhoulette[1]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[2]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[3]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[4]), linetype = "solid") +
+  geom_line(data=silhoulette.df, aes(x=k, y=Silhoulette, color=Method), size=1, linetype = "dashed") +
+  geom_point(data=silhoulette.df, aes(x=k, y=Silhoulette, color=Method), size=3) +
+  labs(title='Silhoulette index for various clustering methods',
+       y='Silhoulette index',
+       x='k')
+```
+
+We will perform cluster analysis with valid number of principal components. We selected the $n+1$ number of components, where $n$ was the number of principal component, which sum of the explained variance ratio of the next component and all previous would result in exceeding 90%. So in our analysis $n=$ `r n.pc`. On the Figure @ref(fig:silhouette-after-dim-red) we can see the average silhouette score for all algorithms trained on constrained data set by different number of clusters. In most cases the score dropped . Otherwise, the AGNES algorithm, which previously performed the worst, now is the best. It's highest average silhouette is around $K=3$ number of clusters, but because it's almost identical as for $K=2$ then for simplicity we will stick to $K=2$. 
+
+An interesting observation occurs for K-Means which has the same level of average silhouette score for all considered number of clusters. So, it will always try to separate the observations identically.
+
+
+```{r pca-new-silhouette, }
+knitr::kable(max.silhoulette,
+             caption = "Silhouette score for clusterization algorithms after performing PCA.", digits = 3)
+```
+
+In the Table @ref(tab:pca-new-silhouette) we can see the highest average silhouette score for all algorithms, As we can remember before PCA, all numbers were around 0.3, but now we observe an outstanding improvement for AGNES algorithm.
+
+## Projecting with MDS
+
+We will now continue the same procedure for MDS algorithm. Using the specification of method, we will perform STRESS vs. dimension analysis presented during the lecture. It will enable us to select proper number of dimensions used for the algorithm.
+
+```{r mds-vis,warning=FALSE, fig.cap="Visualization of data set  after MDS in 2D. We plot X1 versus X2 and just for reference we mark observations using the true customer's label."}
+
+mds.results <- cmdscale(data_dissimilarity_matrix, k=2) %>% data.frame
+
+ggplot() +
+  geom_point(
+    aes(x=mds.results$X1,
+        y=mds.results$X2,
+        color=y$label %>% as.factor),
+    size=2)+
+  labs(title='Clusters after performing (MDS)', color='True Label')
+```
+
+Let's begin with visualizing our transformation in 2D. This time we specify number of dimensions used for the algorithm to 2, and visualize the results on Figure @ref(fig:mds-vis). This time we don't obtained two separate groups, but four, regarding that two of them consists of two subgroups. One more time, despite the fact that we see separate groups, they don't indicate any significant relations between the customer's attitude. Let's take some number of features, e.g. once more 10 and train clustering algorithms on them. Then visualize obtained results in 2D.
+
+
+```{r mds-vis-all,warning=FALSE, fig.cap="Visualization of data set  after MDS in 2D. We plot X1 versus X2 and just for reference we mark observations using the results of considered clusterization algorithms vs true labels."}
+
+mds.results2 <- cmdscale(data_dissimilarity_matrix, k=10)
+kmeans.res <- kmeans(mds.results2[, 1:10], 2, nstart=10)
+kmeans.final.mds = kmeans.res$cluster
+
+pam.final.mds <- pam(mds.results2[, 1:10], k=2)$clustering
+
+agnes.res <- agnes(mds.results2[, 1:10],  method="complete")
+agnes.final.mds <- cutree(agnes.res, k=2)
+
+diana.res <- diana(mds.results2[, 1:10])
+diana.final.mds <- cutree(diana.res, k=2)
+
+
+plot1 <- ggplot() +
+  geom_point(
+    aes(x=mds.results$X1,
+        y=mds.results$X2,
+        shape=kmeans.final.mds %>% as.factor, 
+        color=y$label %>% as.factor),
+    size=1)+
+  labs(title='K-Means (MDS)', shape='Cluster', color='Label')
+
+plot2 <- ggplot() +
+  geom_point(
+    aes(x=mds.results$X1,
+        y=mds.results$X2,
+        shape=pam.final.mds %>% as.factor, 
+        color=y$label %>% as.factor),
+    size=1)+
+  labs(title='PAM (MDS)', shape='Cluster', color='Label')
+
+plot3 <- ggplot() +
+  geom_point(
+    aes(x=mds.results$X1,
+        y=mds.results$X2,
+        shape=agnes.final.mds %>% as.factor, 
+        color=y$label %>% as.factor),
+    size=1)+
+  labs(title='AGNES (MDS)', shape='Cluster', color='Label')
+
+plot4 <- ggplot() +
+  geom_point(
+    aes(x=mds.results$X1,
+        y=mds.results$X2,
+        shape=diana.final.mds %>% as.factor, 
+        color=y$label %>% as.factor),
+    size=1)+
+  labs(title='DIANA (MDS)', shape='Cluster', color='Label')
+
+grid.arrange(plot1, plot2, plot3, plot4, ncol=2, nrow =2)
+```
+
+From the Figure @ref(fig:mds-vis-all) we can see, that in most cases, the clusterization results also tends to separate visualized groups. This time something unexpected happens for PAM algorithm, where we can observe more diversity among the clusters. This time the number of dimensions were done arbitrary. Let's make it more consciously using STRESS vs dimension plot.
+
+```{r stress-mds, warning=FALSE, fig.cap="STRESS vs dimension. We try to minimize the level of STRESS by selecting proper number of features."}
+
+d.max <- ncol(X_scaled)
+stress.vec <- numeric(d.max)
+
+for (d in 1:d.max)
+{
+  mds.k <- cmdscale(data_dissimilarity_matrix, k = d)
+  dist.mds.k <- dist(mds.k, method="euclidean") # we compute Euclidean distances in the new space
+  dis.original <- data_dissimilarity_matrix
+  dist.mds.k <- as.matrix(dist.mds.k)
+  STRESS <- sum((dis.original-dist.mds.k)^2)
+  
+  stress.vec[d] <- STRESS
+}
+
+plot(1:d.max, stress.vec, lwd=2, type="b", pch=19, xlab="dimension (d)", ylab="STRESS")
+title("STRESS vs. dimension")
+```
+
+As we can observe on @ref{fig:stress-mds}, from some point the level of STRESS starts to increase. Our goal is to minimize that measure, so we will choose the resulted number of dimensions to be 7, as for this case we obtain the minimal value of STRESS.
+
+```{r metrics-after-dim-red-mds, warning=FALSE, fig.cap="Comparison of silhouette score for different clustering methods after using MDS against selected number of clusters. The solid lines represents the level of maximum silhouette score for each algorithm."}
+
+n.mds = 7
+mds.train.data <- cmdscale(data_dissimilarity_matrix, k = n.mds)
+
+write.table(mds.train.data, file = "data\\mds_data.csv",
+            sep = ",", row.names = F)
+
+diana.res <- diana(mds.train.data)
+
+kmeans.silhoulette <- c()
+agnes.silhoulette <- c()
+pam.silhoulette <- c()
+diana.silhoulette <- c()
+
+for (k in 2:10){
+  # K-means
+  kmeans.res <- kmeans(mds.train.data, k, nstart=10)
+  sil.kmeans <- silhouette(km.res$cluster, dist(mds.train.data))
+  kmeans.silhoulette <- c(kmeans.silhoulette, sil.kmeans[,3] %>% mean)
+  # AGNES
+  agnes.res <- agnes(mds.train.data,  method="complete")
+  agnes.partition <- cutree(agnes.res, k=k)
+  sil.agnes <- silhouette(agnes.partition, dist(mds.train.data))
+  agnes.silhoulette <- c(agnes.silhoulette, sil.agnes[,3] %>% mean)
+  # PAM
+  pam.res <- pam(mds.train.data, k=k)
+  sil.pam <- silhouette(pam.res$clustering, dist(mds.train.data))
+  pam.silhoulette <- c(pam.silhoulette, sil.pam[,3] %>% mean)
+  # DIANA
+  diana.partition <- cutree(diana.res, k=k)
+  sil.diana <- silhouette(diana.partition, dist(mds.train.data))
+  diana.silhoulette <- c(diana.silhoulette, sil.diana[,3] %>% mean)
+}
+
+k.seq <- 2:10
+silhoulette.df <- data.frame(k=rep(k.seq, 4),
+                             Silhoulette=c(kmeans.silhoulette, agnes.silhoulette, pam.silhoulette, diana.silhoulette),
+                             Method=c(rep('k-means', length(kmeans.silhoulette)),
+                                      rep('AGNES', length(agnes.silhoulette)),
+                                      rep('PAM', length(pam.silhoulette)),
+                                      rep('DIANA', length(diana.silhoulette))))
+max.silhoulette <- tapply(silhoulette.df$Silhoulette, silhoulette.df$Method, max)
+
+ggplot() +
+  geom_line(aes(x=k.seq, y=max.silhoulette[1]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[2]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[3]), linetype = "solid") +
+  geom_line(aes(x=k.seq, y=max.silhoulette[4]), linetype = "solid") +
+  geom_line(data=silhoulette.df, aes(x=k, y=Silhoulette, color=Method), size=1, linetype = "dashed") +
+  geom_point(data=silhoulette.df, aes(x=k, y=Silhoulette, color=Method), size=3) +
+  labs(title='Silhoulette index for various clustering methods',
+       y='Silhoulette index',
+       x='k')
+```
+
+On the Figure @ref(fig:metrics-after-dim-red-mds) we can see the average silhouette score for all algorithms trained on constrained data set from MDS by different number of clusters. This time the behaviour is more similar to the situation before dimensionality reduction. The optimal number of cluster is 2 for all algorithms and they oscillate mostly around 0.3. The difference happens for K-means which one more time presents constant silhouette average score for different number of clusters, but its value is the lowest from all cases.
+
+```{r mds-new-silhouette}
+knitr::kable(max.silhoulette,
+             caption = "Silhouette score for clusterization algorithms after performing MDS.", digits = 3)
+```
+
+The detailed values of highest average silhouette score can be found in Table @ref(tab:mds-new-silhouette). As we discussed, nearly all algorithms have this value around 0.29, but for K-means it is very low on the level of 0.056.
+
+## Results
+
+```{r all-results}
+kmeans.res <- kmeans(pca.train.data, 2, nstart=10)
+kmeans.final.pca = kmeans.res$cluster
+
+pam.final.pca <- pam(pca.train.data, k=2)$clustering
+
+agnes.res <- agnes(pca.train.data,  method="complete")
+agnes.final.pca <- cutree(agnes.res, k=2)
+
+diana.res <- diana(pca.train.data)
+diana.final.pca <- cutree(diana.res, k=2)
+
+kmeans.res <- kmeans(mds.train.data, 2, nstart=10)
+kmeans.final.mds = kmeans.res$cluster
+
+pam.final.mds <- pam(mds.train.data, k=2)$clustering
+
+agnes.res <- agnes(mds.train.data,  method="complete")
+agnes.final.mds <- cutree(agnes.res, k=2)
+
+diana.res <- diana(mds.train.data)
+diana.final.mds <- cutree(diana.res, k=2)
+
+
+labels.kmeans.test.pca <- tail(kmeans.final.pca, n=n_test)
+labels.kmeans.train.pca <- tail(kmeans.final.pca, n=n_train)
+
+labels.agnes.test.pca <- tail(agnes.final.pca, n=n_test)
+labels.agnes.train.pca <- tail(agnes.final.pca, n=n_train)
+
+labels.pam.test.pca <- tail(pam.final.pca, n=n_test)
+labels.pam.train.pca <- tail(pam.final.pca, n=n_train)
+
+labels.diana.test.pca <- tail(diana.final.pca, n=n_test)
+labels.diana.train.pca <- tail(diana.final.pca, n=n_train)
+
+labels.real.test <- y_test$label
+labels.real.train <- y_train$label
+labels.real <- y$label
+
+kmeans.acc.pca <- compareMatchedClasses(kmeans.final.pca, labels.real, method="exact")$diag %>% as.double()
+kmeans.acc.test.pca <-  compareMatchedClasses(labels.kmeans.test.pca, labels.real.test, method="exact")$diag %>% as.double()
+kmeans.acc.train.pca <- compareMatchedClasses(labels.kmeans.train.pca, labels.real.train, method="exact")$diag %>% as.double()
+
+pam.acc.pca <- compareMatchedClasses(pam.final.pca, labels.real, method="exact")$diag %>% as.double()
+pam.acc.test.pca <-  compareMatchedClasses(labels.pam.test.pca, labels.real.test, method="exact")$diag %>% as.double()
+pam.acc.train.pca <- compareMatchedClasses(labels.pam.train.pca, labels.real.train, method="exact")$diag %>% as.double()
+
+agnes.acc.pca <- compareMatchedClasses(agnes.final.pca, labels.real, method="exact")$diag %>% as.double()
+agnes.acc.test.pca <-  compareMatchedClasses(labels.agnes.test.pca, labels.real.test, method="exact")$diag %>% as.double()
+agnes.acc.train.pca <- compareMatchedClasses(labels.agnes.train.pca, labels.real.train, method="exact")$diag %>% as.double()
+
+diana.acc.pca <- compareMatchedClasses(diana.final.pca, labels.real, method="exact")$diag %>% as.double()
+diana.acc.test.pca <-  compareMatchedClasses(labels.diana.test.pca, labels.real.test, method="exact")$diag %>% as.double()
+diana.acc.train.pca <- compareMatchedClasses(labels.diana.train.pca, labels.real.train, method="exact")$diag %>% as.double()
+
+r <- scores(labels.kmeans.test.pca, labels.real.test)
+kmeans.f1.pca = r["F1"]
+kmeans.recall.pca = r["Recall"]
+kmeans.precision.pca = r["Precision"]
+
+r <- scores(labels.pam.test.pca, labels.real.test)
+pam.f1.pca = r["F1"]
+pam.recall.pca = r["Recall"]
+pam.precision.pca = r["Precision"]
+
+r <- scores(labels.agnes.test.pca, labels.real.test)
+agnes.f1.pca = r["F1"]
+agnes.recall.pca = r["Recall"]
+agnes.precision.pca = r["Precision"]
+
+r <- scores(labels.diana.test.pca, labels.real.test)
+diana.f1.pca = r["F1"]
+diana.recall.pca = r["Recall"]
+diana.precision.pca = r["Precision"]
+
+###MDS
+labels.kmeans.test.mds <- tail(kmeans.final.mds, n=n_test)
+labels.kmeans.train.mds <- tail(kmeans.final.mds, n=n_train)
+
+labels.agnes.test.mds <- tail(agnes.final.mds, n=n_test)
+labels.agnes.train.mds <- tail(agnes.final.mds, n=n_train)
+
+labels.pam.test.mds <- tail(pam.final$clustering, n=n_test)
+labels.pam.train.mds <- tail(pam.final$clustering, n=n_train)
+
+labels.diana.test.mds <- tail(diana.final.mds, n=n_test)
+labels.diana.train.mds <- tail(diana.final.mds, n=n_train)
+
+kmeans.acc.mds <- compareMatchedClasses(kmeans.final.mds, labels.real, method="exact")$diag %>% as.double()
+kmeans.acc.test.mds <-  compareMatchedClasses(labels.kmeans.test.mds, labels.real.test, method="exact")$diag %>% as.double()
+kmeans.acc.train.mds <- compareMatchedClasses(labels.kmeans.train.mds, labels.real.train, method="exact")$diag %>% as.double()
+
+pam.acc.mds <- compareMatchedClasses(pam.final.mds, labels.real, method="exact")$diag %>% as.double()
+pam.acc.test.mds <-  compareMatchedClasses(labels.pam.test.mds, labels.real.test, method="exact")$diag %>% as.double()
+pam.acc.train.mds <- compareMatchedClasses(labels.pam.train.mds, labels.real.train, method="exact")$diag %>% as.double()
+
+agnes.acc.mds <- compareMatchedClasses(agnes.final.mds, labels.real, method="exact")$diag %>% as.double()
+agnes.acc.test.mds <-  compareMatchedClasses(labels.agnes.test.mds, labels.real.test, method="exact")$diag %>% as.double()
+agnes.acc.train.mds <- compareMatchedClasses(labels.agnes.train.mds, labels.real.train, method="exact")$diag %>% as.double()
+
+diana.acc.mds <- compareMatchedClasses(diana.final.mds, labels.real, method="exact")$diag %>% as.double()
+diana.acc.test.mds <-  compareMatchedClasses(labels.diana.test.mds, labels.real.test, method="exact")$diag %>% as.double()
+diana.acc.train.mds <- compareMatchedClasses(labels.diana.train.mds, labels.real.train, method="exact")$diag %>% as.double()
+
+
+r <- scores(labels.kmeans.test.mds, labels.real.test)
+kmeans.f1.mds = r["F1"]
+kmeans.recall.mds = r["Recall"]
+kmeans.precision.mds = r["Precision"]
+
+r <- scores(labels.pam.test.mds, labels.real.test)
+pam.f1.mds = r["F1"]
+pam.recall.mds = r["Recall"]
+pam.precision.mds = r["Precision"]
+
+r <- scores(labels.agnes.test.mds, labels.real.test)
+agnes.f1.mds = r["F1"]
+agnes.recall.mds = r["Recall"]
+agnes.precision.mds = r["Precision"]
+
+r <- scores(labels.diana.test.mds, labels.real.test)
+diana.f1.mds = r["F1"]
+diana.recall.mds = r["Recall"]
+diana.precision.mds = r["Precision"]
+
+
+acc.full = c(kmeans.acc, kmeans.acc.pca, kmeans.acc.mds, 
+             pam.acc, pam.acc.pca, pam.acc.mds,
+             agnes.acc, agnes.acc.pca, agnes.acc.mds,
+            diana.acc, diana.acc.pca, diana.acc.mds)
+
+acc.train = c(kmeans.acc.train, kmeans.acc.train.pca, kmeans.acc.train.mds,
+             pam.acc.train, pam.acc.train.pca, pam.acc.train.mds,
+             agnes.acc.train, agnes.acc.train.pca, agnes.acc.train.mds,
+            diana.acc.train, diana.acc.train.pca, diana.acc.train.mds)
+
+acc.test = c(kmeans.acc.test, kmeans.acc.test.pca, kmeans.acc.test.mds, 
+             pam.acc.test, pam.acc.test.pca, pam.acc.test.mds,
+             agnes.acc.test, agnes.acc.test.pca, agnes.acc.test.mds,
+            diana.acc.test, diana.acc.test.pca, diana.acc.test.mds)
+
+f1.list = c(kmeans.f1, kmeans.f1.pca, kmeans.f1.mds, 
+             pam.f1, pam.f1.pca, pam.f1.mds,
+             agnes.f1, agnes.f1.pca, agnes.f1.mds,
+            diana.f1, diana.f1.pca, diana.f1.mds)
+
+recall.list = c(kmeans.recall, kmeans.recall.pca, kmeans.recall.mds, 
+             pam.recall, pam.recall.pca, pam.recall.mds,
+             agnes.recall, agnes.recall.pca, agnes.recall.mds,
+            diana.recall, diana.recall.pca, diana.recall.mds)
+
+precision.list = c(kmeans.precision, kmeans.precision.pca, kmeans.precision.mds, 
+             pam.precision, pam.precision.pca, pam.precision.mds,
+             agnes.precision, agnes.precision.pca, agnes.precision.mds,
+            diana.precision, diana.precision.pca, diana.precision.mds)
+
+results.init <- data.frame(Accuracy.full=acc.full,
+                           Accuracy.train=acc.train,
+                           Accuracy.test=acc.test,
+                           F1.test=f1.list,
+                           Recall.test=recall.list,
+                           Precision.test=precision.list)
+
+rownames(results.init) <- c('K-Means', 'K-Means (PCA)', 'K-Means (MDS)',
+                            'PAM', 'PAM (PCA)', 'PAM (MDS)',
+                            'AGNES', 'AGNES (PCA)', 'AGNES (MDS)',
+                            'DIANA', 'DIANA (PCA)', "DIANA (MDS)")
+
+results.init2 <- data.frame(Accuracy.full=c(NA, NA, NA, NA, NA),
+                           Accuracy.train=c(0.76, 0.77, 0.74, 0.96, 0.93),
+                           Accuracy.test=c(0.74, 0.77, 0.72, 0.77, 0.74),
+                           F1.test=c(0.48, 0.59, 0.43, 0.63, 0.40),
+                           Recall.test=c(0.41, 0.56, 0.36, 0.66, 0.29),
+                           Precision.test=c(0.60, 0.63, 0.55, 0.60, 0.63))
+
+rownames(results.init2) <- c('LDA', 'QDA', 'K-Neighbors' , 'Random Forest', 'TPOT')
+
+results2 <- read.csv(file="data/results.csv")
+rownames(results2) <- results2$Name
+results2 <- subset(results2, select = c(2:ncol(results2)) )
+
+results2$Accuracy.full = NA
+results2 <- results2[, c(6, 1, 2, 3, 4, 5)]
+colnames(results2) <- colnames(results.init2)
+row.order = c('LDA', "LDA (PCA)", "LDA (MDS)",
+              'QDA', "QDA (PCA)", "QDA (MDS)", 
+              'K-Neighbors', "KNN (PCA)", "KNN (MDS)",
+              'Random Forest', "RF (PCA)", "RF (MDS)" ,
+              'TPOT')
+results3 <- rbind(results.init2, results2)[row.order,]
+
+results.init = rbind(results.init, results3)
+
+knitr::kable(results.init,
+             caption = "Results of all analysed algorithms in classifying bad customers.",
+             digits = 3)
+```
+
+
+We performed analysis of clusterization for PCA and MDS. We will move to quality assessments of used methods similar to the previous one. All results were presented in @ref{tab:all-results}, where to previously assessed algorithms, we add evaluations after dimensionality reduction. 
+
+The analysis were also performed for supervised methods, but in this case we omit the advanced hyperparameter tuning and just take the output of PCA and MDS, split the data into train and test set and train the models with their hyperparameters obtained during the previous analysis. 
+
+The results for PAM and K-Means despite different befavior during assessment of dimensionality reduction don't change. For AGNES we can obtain slight improvement after using MDS and relevant improvement using PCA which agrees with our previous conclusions. What is more interesting is that, the DIANA using PCA obtained identical results, despite previous differences. Regarding that, the MDS doesn't change anything for DIANA algorithm.
+
+Following that, we may conclude that the linear transformation of data set was needed for hierarchical clustering to obtain such result. In case of AGNES the slight improvement with MDS may come from the chosen linkage method for the algorithm. Interesting is that for partitioning methods like K-Means and PAM there are no differences in results, but maybe it's the case of the size of data.
+
+For the supervised methods, the results are looking slightly different. For LDA, we can see an improvement using PCA. It may come from the previously violated assumption, that LDA needs the continuous values, which this time it received. Also, the fact that it is a linear model and the PCA performs linear combination on data could have impact on such behavior. There is no improvement after using MDS. The situation differs for QDA. 
+
+Last time we also violated assumptions of the algorithm, but the dimensionality reduction doesn't improve the accuracy. Subsequently, the precision/recall for the MDS is tragic, but we obtain significant improvement of those metrics for the PCA case. The decrease of accuracy had to be in cost of misclassifying the good customers, but our interest is in proper classification of bad ones. Regarding that, the algorithm received great result.
+
+The same behavior as for the LDA occurred for the K-Neighbors algorithm, but the improvement isn't so big as for LDA.
+
+For the random forest, the dimensionality reduction also  doesn't improve the results. It looks that some important properties of features, from the point of view of this algorithm, disappeared. 
+
+The clustering algorithms still performs worse than supervised methods, which is an natural observation. What is relevant, that despite the whole dimensionality reduction analysis the LDA, which obtained because of it the best accuracy across all considered algorithms along with PCA and MDA, still don't beat the initially trained random forest. The other case happens for QDA along with PCA. It indeed has worse accuracy, but it outperforms random forest in case of precision and recall, which is far more relevant to us. So if we would like to focus on classifyng bad customers, we should use QDA preceded by PCA.
+
+# Conclusion
+
+We tried to perform cluster analysis with comparison to supervised methods. Then we perform similar analysis after using dimensionality reduction. Regarding that, we could reevaluate some of our conclusions from previous part of project. Let's recall that our major goal is to classify if the creditors will be good or bad customers, with more weight put on classifying bad customers. We used data about characteristics of customers from both groups to train different algorithms. The task from the begining was non-trivial and despite using advanced methods, the results on the test set were below practical values of precision and recall. Our major objective was to be more precise in misclassifying bad than good customers and using the bad customers as a positive class, the recall was at most 66% from the tuned random forest. 
+
+The analysis could have reassured us that the clusterization algorithms performs worse than supervised methods, even after using dimensionality reduction. Nonetheless, those exercise could show us that there are no clear relations between features about customer and their attitude to paying the loan. The algorithms indeed, found that there are two groups in data, but they completely couldn't translate them into classification groups.
+
+The analysis of dimensionality reduction with addition of the supervised methods resulted in finding that the QDA along with PCA may outperform random forest in case of classifying bad customers. 
+It is worth outline, that there could extend the analysis of dimensionality reduction with classification methods using some kind of hyperparameter tuning. So we could allow models to give their best in the evaluation. In my opinion after such operations random forest should one more time outperform the QDA algorithm.
+
+In conclusion, despite the methods and algorithms used in the project there may be some other methods which could increase the performance, like some from the field of deep learning. The model's user should keep in mind that its prediction isn't ideal, and the presence of bad customers may occur. The analysis could be extended on the financial reports concerning how this classification results could influence the solvency of the bank.
